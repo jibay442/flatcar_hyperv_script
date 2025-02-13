@@ -5,11 +5,16 @@ Expand-Archive flatcar_production_hyperv_vhdx_image.vhdx.zip .
 #Deploying a new virtual machine on Hyper-V using Ignition with autologin and TPM LUKS2 root partition encryption 
 
 $vmName = "my_flatcar_01"
-$vmDisk = "flatcar_production_hyperv_vhdx_image.vhdx"
+$scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+$vmDisk = "$scriptPath\flatcar_production_hyperv_vhdx_image.vhdx"
+
 
 New-VM -Name $vmName -MemoryStartupBytes 2GB `
-    -BootDevice VHD -SwitchName "VMSwitch" -VHDPath $vmDisk -Generation 2
+    -BootDevice VHD -SwitchName (Get-VMSwitch | Where-Object {$_.SwitchType -eq "External"} | Select-Object -First 1 -ExpandProperty Name) `
+    -VHDPath $vmDisk -Generation 2
+
 Set-VMFirmware -EnableSecureBoot "Off" -VMName $vmName
+
 
 # The core user password is set to foo
 
@@ -32,8 +37,33 @@ storage:
     - device: /dev/mapper/rootencrypted
       format: ext4
       label: ROOT
+  files:
+    - path: /etc/systemd/network/00-static.network
+      filesystem: root
+      mode: 0644
+      contents:
+        inline: |
+          [Match]
+          Name=eth0
+
+          [Network]
+          Address=192.168.42.147/24
+          Gateway=192.168.42.253
+          DNS=1.1.1.1 8.8.8.8
 systemd:
   units:
+    - name: systemd-networkd.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Network Service
+        Wants=network.target
+        Before=network.target
+        [Service]
+        ExecStart=/lib/systemd/systemd-networkd
+        Restart=always
+        [Install]
+        WantedBy=multi-user.target
     - name: cryptenroll-helper.service
       enabled: true
       contents: |
@@ -69,16 +99,3 @@ Set-VMKeyProtector -VMName $vmName -NewLocalKeyProtector
 Enable-VMTPM -VMName $vmName
 
 Start-VM -Name $vmName
-
-# Wait a few seconds to allow the VM to start and obtain an IP address
-Start-Sleep -Seconds 95
-
-# Retrieve the VM's IP address
-$vmIp = (Get-VMNetworkAdapter -VMName $vmName).IPAddresses
-
-# Display the IP address
-if ($vmIp) {
-    Write-Host "The IP address of the virtual machine '$vmName' is: $vmIp"
-} else {
-    Write-Host "Unable to retrieve the VM's IP address. Make sure the VM is properly connected to the network."
-}
